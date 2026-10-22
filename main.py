@@ -186,7 +186,6 @@ def process_photo(message, data):
 
     data['photo_id'] = message.photo[-1].file_id
 
-    # Summary Preview
     summary = (
         f"📋 **SEMAKAN MAKLUMAT LISTING**\n\n"
         f"🔹 **Jenis:** {data['trans_type']} - {data['property_type']}\n"
@@ -279,4 +278,7 @@ def callback_handler(call):
 if __name__ == "__main__":
     t = threading.Thread(target=run_flask)
     t.start()
-    bot.infinity_polling()
+    
+    # Menghapuskan sebarang konflik webhook/sesi lama
+    bot.remove_webhook()
+    bot.infinity_polling(skip_pending=True)
