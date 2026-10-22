@@ -48,29 +48,31 @@ def init_db():
 init_db()
 
 # ------------------------------------
-# 2. FLASK WEB SERVER (Render Keep-Alive)
+# 2. FLASK WEB SERVER
 # ------------------------------------
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "RenBot Web Service is running with Database!"
+    return "RenBot Web Service is online!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-# Memori Sementara untuk Borang
 user_data = {}
 
 # ------------------------------------
-# 3. BOT HANDLERS & NAVIGATION
+# 3. COMMAND HANDLERS
 # ------------------------------------
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_id = message.from_user.id
     user_name = message.from_user.first_name
+    
+    # Reset sebarang handler jawapan yang tergantung
+    bot.clear_step_handler_by_chat_id(message.chat.id)
 
     if user_id not in WHITELISTED_USERS:
         bot.reply_to(
@@ -85,18 +87,19 @@ def send_welcome(message):
     bot.reply_to(
         message, 
         f"Selamat datang, **{user_name}**! 🏠\n"
-        f"Sistem *RenBot Real Estate Listing* aktif dengan Database.\n\n"
-        f"Gunakan arahan /add untuk mula memasukkan listing baharu\n"
-        f"atau /list untuk melihat senarai listing.",
+        f"Sistem *RenBot Real Estate Listing* aktif.\n\n"
+        f"• Guna /add untuk tambah listing baharu.\n"
+        f"• Guna /list untuk lihat senarai listing.",
         parse_mode="Markdown"
     )
 
-# --- SENARAIKAN LISTING (/list) ---
 @bot.message_handler(commands=['list'])
 def list_listings(message):
     user_id = message.from_user.id
     if user_id not in WHITELISTED_USERS:
         return
+
+    bot.clear_step_handler_by_chat_id(message.chat.id)
 
     conn = sqlite3.connect('renbot.db')
     cursor = conn.cursor()
@@ -105,22 +108,23 @@ def list_listings(message):
     conn.close()
 
     if not rows:
-        bot.reply_to(message, "📂 Tiada listing hartanah yang tersimpan dalam sistem lagi.")
+        bot.reply_to(message, "📂 Tiada listing hartanah yang tersimpan lagi.")
         return
 
-    response = "📂 **SENARAI LISTING HARTANAHS ANDA:**\n\n"
+    response = "📂 **SENARAI LISTING HARTANAH ANDA:**\n\n"
     for row in rows:
         response += f"🔹 **ID #{row[0]}** | `{row[1]}` - {row[2]}\n📍 Lokasi: {row[3]}\n💰 Harga: RM {row[4]}\n\n"
     
     bot.reply_to(message, response, parse_mode="Markdown")
 
-# --- MULA PROSES TAMBAH LISTING (/add) ---
 @bot.message_handler(commands=['add'])
 def start_add_listing(message):
     user_id = message.from_user.id
     if user_id not in WHITELISTED_USERS:
         return
 
+    # Kunci utama: bersihkan sebarang step handler lama yang tersangkut
+    bot.clear_step_handler_by_chat_id(message.chat.id)
     user_data[user_id] = {}
 
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -130,7 +134,9 @@ def start_add_listing(message):
 
     bot.send_message(message.chat.id, "📌 **Langkah 1/15:** Pilih jenis urus niaga:", reply_markup=markup, parse_mode="Markdown")
 
-# --- CALLBACK HANDLER FOR BUTTONS ---
+# ------------------------------------
+# 4. CALLBACK QUERY HANDLER
+# ------------------------------------
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
     user_id = call.from_user.id
@@ -139,13 +145,16 @@ def handle_callbacks(call):
     if user_id not in WHITELISTED_USERS:
         return
 
+    # Beri maklum balas serta-merta pada Telegram bahawa klik butang diterima
+    bot.answer_callback_query(call.id)
+
     data = call.data
 
     # Simpan Akhir
     if data == "save_listing_final":
         d = user_data.get(user_id, {})
         if not d:
-            bot.answer_callback_query(call.id, "Sesi tamat atau data kosong. Sila guna /add semula.")
+            bot.send_message(chat_id, "⚠️ Sesi tamat. Sila guna /add semula.")
             return
 
         conn = sqlite3.connect('renbot.db')
@@ -162,8 +171,7 @@ def handle_callbacks(call):
         conn.commit()
         conn.close()
 
-        bot.edit_message_caption("✅ **Berjaya!** Listing hartanah anda telah disimpan secara kekal dalam database.", chat_id, call.message.message_id, parse_mode="Markdown")
-        bot.send_message(chat_id, "Guna arahan /list untuk melihat semua senarai listing anda.")
+        bot.send_message(chat_id, "✅ **Berjaya!** Listing hartanah anda telah disimpan secara kekal dalam database.\n\nGuna /list untuk melihat senarai.", parse_mode="Markdown")
         user_data.pop(user_id, None)
         return
 
@@ -233,7 +241,9 @@ def handle_callbacks(call):
         msg = bot.send_message(chat_id, "📍 **Langkah 7/15:** Masukkan Lokasi / Kawasan Hartanah:\n*(Contoh: Seksyen 13, Shah Alam)*", parse_mode="Markdown")
         bot.register_next_step_handler(msg, step_price)
 
-# --- NEXT STEP TEXT HANDLERS ---
+# ------------------------------------
+# 5. NEXT STEP HANDLERS
+# ------------------------------------
 
 def ask_lot_status_after_lease(message):
     user_id = message.from_user.id
@@ -288,7 +298,7 @@ def step_surrounding(message):
 def step_image(message):
     user_id = message.from_user.id
     user_data[user_id]['surrounding'] = message.text
-    msg = bot.send_message(message.chat.id, "🖼️ **Langkah 14/15:** Hantar satu Gambar Utama Hartanah:", parse_mode="Markdown")
+    msg = bot.send_message(message.chat.id, "🖼️ **Langkah 14/15:** Hantar satu Gambar Utama Hartanah (atau hantar teks 'Skip' jika tiada):", parse_mode="Markdown")
     bot.register_next_step_handler(msg, step_confirm)
 
 def step_confirm(message):
@@ -333,5 +343,5 @@ if __name__ == "__main__":
     t = threading.Thread(target=run_flask)
     t.start()
     
-    print("RenBot dengan Database sedang berjalan...")
-    bot.infinity_polling()
+    print("RenBot sedang berjalan...")
+    bot.infinity_polling(skip_pending=True)
