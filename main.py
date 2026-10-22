@@ -1,406 +1,282 @@
 import os
-import sqlite3
-import threading
-from flask import Flask
 import telebot
 from telebot import types
-from dotenv import load_dotenv
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import threading
+from flask import Flask
 
-load_dotenv()
+# ================= CONFIGURATION =================
+TOKEN = os.environ.get('BOT_TOKEN')
+DATABASE_URL = os.environ.get('DATABASE_URL')
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
 
-WHITELISTED_USERS = [ADMIN_ID]
+@app.route('/')
+def home():
+    return "RenBot is alive and running!"
 
-bot = telebot.TeleBot(BOT_TOKEN)
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
 
-# ------------------------------------
-# 1. DATABASE SETUP
-# ------------------------------------
+# ================= DATABASE SETUP =================
+def get_db_connection():
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    return conn
+
 def init_db():
-    conn = sqlite3.connect('renbot.db')
-    cursor = conn.cursor()
-    cursor.execute('''
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('''
         CREATE TABLE IF NOT EXISTS listings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            listing_type TEXT,
-            prop_type TEXT,
-            tenure TEXT,
-            lease_years TEXT,
-            lot_status TEXT,
-            parking TEXT,
-            gated TEXT,
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            trans_type TEXT,
+            property_type TEXT,
+            title TEXT,
             location TEXT,
             price TEXT,
-            market_value TEXT,
+            bedrooms TEXT,
+            bathrooms TEXT,
+            parking TEXT,
             size TEXT,
-            rooms TEXT,
-            maintenance TEXT,
-            surrounding TEXT,
-            image_id TEXT
+            tenure TEXT,
+            features TEXT,
+            contact TEXT,
+            remarks TEXT,
+            photo_id TEXT
         )
     ''')
     conn.commit()
+    cur.close()
     conn.close()
 
 init_db()
 
-# ------------------------------------
-# 2. FLASK WEB SERVER
-# ------------------------------------
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "RenBot Web Service is online!"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
-
-user_data = {}
-
-# ------------------------------------
-# 3. COMMAND HANDLERS
-# ------------------------------------
+# ================= BOT COMMANDS =================
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_id = message.from_user.id
     user_name = message.from_user.first_name
     bot.clear_step_handler_by_chat_id(message.chat.id)
-
-    if user_id not in WHITELISTED_USERS:
-        bot.reply_to(
-            message,
-            f"Maaf, {user_name}. Anda belum berdaftar.\n\n"
-            f"🆔 **ID Telegram Anda:** `{user_id}`\n"
-            f"Sila hantar ID ini kepada Admin.",
-            parse_mode="Markdown"
-        )
-        return
-
+    
     bot.reply_to(
         message, 
         f"Selamat datang, **{user_name}**! 🏠\n"
-        f"Sistem *RenBot Real Estate Listing* aktif.\n\n"
+        f"Sistem *RenBot Real Estate Listing* (Mod Percubaan Demo).\n\n"
         f"• Guna /add untuk tambah listing baharu.\n"
-        f"• Guna /list untuk lihat senarai listing.",
+        f"• Guna /list untuk lihat senarai listing anda.\n\n"
+        f"🆔 **ID Telegram Anda:** `{user_id}`",
         parse_mode="Markdown"
     )
 
-# --- FUNGSI LIHAT SENARAI LISTING (/list) ---
 @bot.message_handler(commands=['list'])
 def list_listings(message):
     user_id = message.from_user.id
-    if user_id not in WHITELISTED_USERS:
-        return
-
-    bot.clear_step_handler_by_chat_id(message.chat.id)
-
-    conn = sqlite3.connect('renbot.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, listing_type, prop_type, location, price FROM listings WHERE user_id = ?", (user_id,))
-    rows = cursor.fetchall()
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM listings WHERE user_id = %s ORDER BY id DESC", (user_id,))
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
 
     if not rows:
         bot.reply_to(message, "📂 Tiada listing hartanah yang tersimpan lagi.")
         return
 
-    bot.reply_to(message, "📂 **SENARAI LISTING HARTANAH ANDA:**", parse_mode="Markdown")
+    bot.reply_to(message, f"📋 **SENARAI HARTANAH ANDA ({len(rows)}):**", parse_mode="Markdown")
     
-    # Hantar setiap listing sebagai kad mesej berasingan bersama butang aksi
     for row in rows:
-        listing_id, listing_type, prop_type, location, price = row
-        msg_text = (
-            f"🔹 **ID #{listing_id}** | `{listing_type}` - {prop_type}\n"
-            f"📍 **Lokasi:** {location}\n"
-            f"💰 **Harga:** RM {price}"
-        )
-        
         markup = types.InlineKeyboardMarkup()
-        btn_view = types.InlineKeyboardButton("👁️ Lihat Detail", callback_data=f"view_detail_{listing_id}")
-        btn_delete = types.InlineKeyboardButton("🗑️ Padam", callback_data=f"delete_listing_{listing_id}")
-        markup.add(btn_view, btn_delete)
-        
-        bot.send_message(message.chat.id, msg_text, reply_markup=markup, parse_mode="Markdown")
+        btn_view = types.InlineKeyboardButton("👁️ Lihat Detail", callback_data=f"view_{row['id']}")
+        btn_del = types.InlineKeyboardButton("🗑️ Padam", callback_data=f"del_{row['id']}")
+        markup.add(btn_view, btn_del)
 
+        text = f"🏢 **ID #{row['id']} - {row['property_type']}**\n📍 Lokasi: {row['location']}\n💰 Harga: RM {row['price']}"
+        bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="Markdown")
+
+# ================= ADD LISTING FLOW (15 STEPS) =================
 @bot.message_handler(commands=['add'])
-def start_add_listing(message):
+def add_start(message):
     user_id = message.from_user.id
-    if user_id not in WHITELISTED_USERS:
+    markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
+    markup.add("WTS (For Sale)", "WTL (For Rent)")
+    msg = bot.reply_to(message, "📌 **Langkah 1/15:** Pilih jenis urus niaga:", reply_markup=markup, parse_mode="Markdown")
+    bot.register_next_step_handler(msg, process_trans_type)
+
+def process_trans_type(message):
+    data = {'user_id': message.from_user.id, 'trans_type': message.text}
+    markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
+    markup.add("Condo", "Serviced Residence", "Apartment", "Terraced House", "Semi-D", "Bungalow", "Land", "Commercial")
+    msg = bot.reply_to(message, "📌 **Langkah 2/15:** Pilih Jenis Hartanah:", reply_markup=markup, parse_mode="Markdown")
+    bot.register_next_step_handler(msg, process_property_type, data)
+
+def process_property_type(message, data):
+    data['property_type'] = message.text
+    msg = bot.reply_to(message, "📌 **Langkah 3/15:** Sila masukkan **Tajuk Iklan / Headline**:", parse_mode="Markdown")
+    bot.register_next_step_handler(msg, process_title, data)
+
+def process_title(message, data):
+    data['title'] = message.text
+    msg = bot.reply_to(message, "📌 **Langkah 4/15:** Sila masukkan **Lokasi / Kawasan** (Cth: Mont Kiara, KL):", parse_mode="Markdown")
+    bot.register_next_step_handler(msg, process_location, data)
+
+def process_location(message, data):
+    data['location'] = message.text
+    msg = bot.reply_to(message, "📌 **Langkah 5/15:** Sila masukkan **Harga (RM)** (Cth: 550000):", parse_mode="Markdown")
+    bot.register_next_step_handler(msg, process_price, data)
+
+def process_price(message, data):
+    data['price'] = message.text
+    msg = bot.reply_to(message, "📌 **Langkah 6/15:** Bilangan Bilik Tidur (Cth: 3):", parse_mode="Markdown")
+    bot.register_next_step_handler(msg, process_bedrooms, data)
+
+def process_bedrooms(message, data):
+    data['bedrooms'] = message.text
+    msg = bot.reply_to(message, "📌 **Langkah 7/15:** Bilangan Bilik Air (Cth: 2):", parse_mode="Markdown")
+    bot.register_next_step_handler(msg, process_bathrooms, data)
+
+def process_bathrooms(message, data):
+    data['bathrooms'] = message.text
+    msg = bot.reply_to(message, "📌 **Langkah 8/15:** Jumlah Petak Parkir (Cth: 1):", parse_mode="Markdown")
+    bot.register_next_step_handler(msg, process_parking, data)
+
+def process_parking(message, data):
+    data['parking'] = message.text
+    msg = bot.reply_to(message, "📌 **Langkah 9/15:** Keluasan (Build-up / Land Area dalam sqft) (Cth: 1050 sqft):", parse_mode="Markdown")
+    bot.register_next_step_handler(msg, process_size, data)
+
+def process_size(message, data):
+    data['size'] = message.text
+    markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
+    markup.add("Freehold", "Leasehold", "Malay Reserve", "Bumi Lot", "Non-Bumi Lot")
+    msg = bot.reply_to(message, "📌 **Langkah 10/15:** Status Pegangan (Tenure):", reply_markup=markup, parse_mode="Markdown")
+    bot.register_next_step_handler(msg, process_tenure, data)
+
+def process_tenure(message, data):
+    data['tenure'] = message.text
+    msg = bot.reply_to(message, "📌 **Langkah 11/15:** Keistimewaan / Renovation (Cth: Fully Furnished, Kitchen Cabinet):", parse_mode="Markdown")
+    bot.register_next_step_handler(msg, process_features, data)
+
+def process_features(message, data):
+    data['features'] = message.text
+    msg = bot.reply_to(message, "📌 **Langkah 12/15:** Nombor Telefon / Link WhatsApp Untuk Dihubungi:", parse_mode="Markdown")
+    bot.register_next_step_handler(msg, process_contact, data)
+
+def process_contact(message, data):
+    data['contact'] = message.text
+    msg = bot.reply_to(message, "📌 **Langkah 13/15:** Nota Tambahan / Remarks (Atau taip 'Tiada'):", parse_mode="Markdown")
+    bot.register_next_step_handler(msg, process_remarks, data)
+
+def process_remarks(message, data):
+    data['remarks'] = message.text
+    markup = types.ForceReply(selective=True)
+    msg = bot.reply_to(message, "📌 **Langkah 14/15:** Sila muat naik **1 keping gambar hartanah**:", reply_markup=markup, parse_mode="Markdown")
+    bot.register_next_step_handler(msg, process_photo, data)
+
+def process_photo(message, data):
+    if not message.photo:
+        msg = bot.reply_to(message, "⚠️ Sila hantar **gambar** hartanah (bukan dokumen/teks). Cuba hantar semula:")
+        bot.register_next_step_handler(msg, process_photo, data)
         return
 
-    bot.clear_step_handler_by_chat_id(message.chat.id)
-    user_data[user_id] = {}
+    data['photo_id'] = message.photo[-1].file_id
 
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn1 = types.InlineKeyboardButton("WTS (For Sale)", callback_data="listing_type_WTS")
-    btn2 = types.InlineKeyboardButton("WTL (For Rent)", callback_data="listing_type_WTL")
-    markup.add(btn1, btn2)
-
-    bot.send_message(message.chat.id, "📌 **Langkah 1/15:** Pilih jenis urus niaga:", reply_markup=markup, parse_mode="Markdown")
-
-# ------------------------------------
-# 4. CALLBACK QUERY HANDLER
-# ------------------------------------
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callbacks(call):
-    user_id = call.from_user.id
-    chat_id = call.message.chat.id
-
-    if user_id not in WHITELISTED_USERS:
-        return
-
-    bot.answer_callback_query(call.id)
-    data = call.data
-
-    # --- PANGGUL DETAIL LISTING KELUAR ---
-    if data.startswith("view_detail_"):
-        listing_id = data.replace("view_detail_", "")
-        
-        conn = sqlite3.connect('renbot.db')
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM listings WHERE id = ? AND user_id = ?", (listing_id, user_id))
-        item = cursor.fetchone()
-        conn.close()
-
-        if not item:
-            bot.send_message(chat_id, "⚠️ Listing tidak dijumpai.")
-            return
-
-        # Format maklumat penuh untuk dicetak semula
-        full_detail = (
-            f"🏠 **DETAIL LISTING HARTANAH #{item[0]}** 🏠\n\n"
-            f"📌 **Status:** {item[2]} | {item[3]}\n"
-            f"📍 **Lokasi:** {item[9]}\n"
-            f"💰 **Harga:** RM {item[10]}\n"
-            f"📊 **Market Value:** {item[11]}\n\n"
-            f"📐 **Saiz:** {item[12]}\n"
-            f"🛏️ **Bilik/Bilik Air:** {item[13]}\n"
-            f"📜 **Tenure:** {item[4]} (Baki: {item[5]})\n"
-            f"🏷️ **Lot Status:** {item[6]}\n"
-            f"🛡️ **Gated & Guarded:** {item[8]}\n"
-            f"🚗 **Parkir:** {item[7]}\n"
-            f"💵 **Maintenance:** {item[14]}\n"
-            f"🏙️ **Surrounding Area:** {item[15]}"
-        )
-        
-        image_id = item[16]
-        if image_id and image_id != "None":
-            bot.send_photo(chat_id, image_id, caption=full_detail, parse_mode="Markdown")
-        else:
-            bot.send_message(chat_id, full_detail, parse_mode="Markdown")
-        return
-
-    # --- PADAM LISTING ---
-    elif data.startswith("delete_listing_"):
-        listing_id = data.replace("delete_listing_", "")
-        
-        conn = sqlite3.connect('renbot.db')
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM listings WHERE id = ? AND user_id = ?", (listing_id, user_id))
-        conn.commit()
-        conn.close()
-
-        bot.send_message(chat_id, f"🗑️ Listing **#{listing_id}** telah berjaya dipadam dari database.", parse_mode="Markdown")
-        return
-
-    # Simpan Akhir
-    if data == "save_listing_final":
-        d = user_data.get(user_id, {})
-        if not d:
-            bot.send_message(chat_id, "⚠️ Sesi tamat. Sila guna /add semula.")
-            return
-
-        conn = sqlite3.connect('renbot.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO listings (user_id, listing_type, prop_type, tenure, lease_years, lot_status, parking, gated, location, price, market_value, size, rooms, maintenance, surrounding, image_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            user_id, d.get('listing_type'), d.get('prop_type'), d.get('tenure'), d.get('lease_years'),
-            d.get('lot_status'), d.get('parking'), d.get('gated'), d.get('location'),
-            d.get('price'), d.get('market_value'), d.get('size'), d.get('rooms'),
-            d.get('maintenance'), d.get('surrounding'), d.get('image_id')
-        ))
-        conn.commit()
-        conn.close()
-
-        bot.send_message(chat_id, "✅ **Berjaya!** Listing hartanah anda telah disimpan secara kekal dalam database.\n\nGuna /list untuk melihat senarai.", parse_mode="Markdown")
-        user_data.pop(user_id, None)
-        return
-
-    # Step 1: WTS / WTL
-    if data.startswith("listing_type_"):
-        user_data[user_id]['listing_type'] = data.split("_")[2]
-        
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("Apartment/Condo", callback_data="prop_type_Apartment/Condo"),
-            types.InlineKeyboardButton("Single Storey", callback_data="prop_type_Single Storey"),
-            types.InlineKeyboardButton("Double Storey", callback_data="prop_type_Double Storey"),
-            types.InlineKeyboardButton("Lain-lain", callback_data="prop_type_Lain-lain")
-        )
-        bot.edit_message_text("🏠 **Langkah 2/15:** Pilih jenis hartanah:", chat_id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
-
-    # Step 2: Property Type
-    elif data.startswith("prop_type_"):
-        user_data[user_id]['prop_type'] = data.replace("prop_type_", "")
-        
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("Freehold", callback_data="tenure_Freehold"),
-            types.InlineKeyboardButton("Leasehold", callback_data="tenure_Leasehold")
-        )
-        bot.edit_message_text("📜 **Langkah 3/15:** Pilih status pegangan tanah (Tenure):", chat_id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
-
-    # Step 3: Tenure
-    elif data.startswith("tenure_"):
-        tenure = data.split("_")[1]
-        user_data[user_id]['tenure'] = tenure
-
-        if tenure == "Leasehold":
-            msg = bot.send_message(chat_id, "⏳ Berapa baki tahun untuk Leasehold ini? (Contoh: `85`):", parse_mode="Markdown")
-            bot.register_next_step_handler(msg, ask_lot_status_after_lease)
-        else:
-            user_data[user_id]['lease_years'] = "N/A"
-            ask_lot_status(chat_id)
-
-    # Step 4: Lot Status
-    elif data.startswith("lot_"):
-        user_data[user_id]['lot_status'] = data.replace("lot_", "")
-        
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("1 Carpark", callback_data="parking_1 Carpark"),
-            types.InlineKeyboardButton("2 Carparks", callback_data="parking_2 Carparks"),
-            types.InlineKeyboardButton("Lain-lain / Tiada", callback_data="parking_Lain-lain")
-        )
-        bot.edit_message_text("🚗 **Langkah 5/15:** Pilih bilangan parkir:", chat_id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
-
-    # Step 5: Parking
-    elif data.startswith("parking_"):
-        user_data[user_id]['parking'] = data.replace("parking_", "")
-        
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("Ya (Gated & Guarded)", callback_data="gated_Ya"),
-            types.InlineKeyboardButton("Tidak", callback_data="gated_Tidak")
-        )
-        bot.edit_message_text("🛡️ **Langkah 6/15:** Adakah kawasan Gated & Guarded?", chat_id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
-
-    # Step 6: Gated & Guarded
-    elif data.startswith("gated_"):
-        user_data[user_id]['gated'] = data.replace("gated_", "")
-        
-        msg = bot.send_message(chat_id, "📍 **Langkah 7/15:** Masukkan Lokasi / Kawasan Hartanah:\n*(Contoh: Seksyen 13, Shah Alam)*", parse_mode="Markdown")
-        bot.register_next_step_handler(msg, step_price)
-
-# ------------------------------------
-# 5. NEXT STEP HANDLERS
-# ------------------------------------
-
-def ask_lot_status_after_lease(message):
-    user_id = message.from_user.id
-    user_data[user_id]['lease_years'] = message.text
-    ask_lot_status(message.chat.id)
-
-def ask_lot_status(chat_id):
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("Bumi Lot", callback_data="lot_Bumi Lot"),
-        types.InlineKeyboardButton("Malay Reserved", callback_data="lot_Malay Reserved"),
-        types.InlineKeyboardButton("Non Bumi Lot", callback_data="lot_Non Bumi Lot")
-    )
-    bot.send_message(chat_id, "🏷️ **Langkah 4/15:** Pilih status lot:", reply_markup=markup, parse_mode="Markdown")
-
-def step_price(message):
-    user_id = message.from_user.id
-    user_data[user_id]['location'] = message.text
-    msg = bot.send_message(message.chat.id, "💰 **Langkah 8/15:** Masukkan Harga Jualan/Sewa (RM):\n*(Contoh: 450000)*", parse_mode="Markdown")
-    bot.register_next_step_handler(msg, step_mv)
-
-def step_mv(message):
-    user_id = message.from_user.id
-    user_data[user_id]['price'] = message.text
-    msg = bot.send_message(message.chat.id, "📊 **Langkah 9/15:** Masukkan Market Value (RM):\n*(Jika tiada, taip 'N/A')*", parse_mode="Markdown")
-    bot.register_next_step_handler(msg, step_size)
-
-def step_size(message):
-    user_id = message.from_user.id
-    user_data[user_id]['market_value'] = message.text
-    msg = bot.send_message(message.chat.id, "📐 **Langkah 10/15:** Masukkan Saiz Hartanah:\n*(Contoh: 1,050 sqft)*", parse_mode="Markdown")
-    bot.register_next_step_handler(msg, step_rooms)
-
-def step_rooms(message):
-    user_id = message.from_user.id
-    user_data[user_id]['size'] = message.text
-    msg = bot.send_message(message.chat.id, "🛏️ **Langkah 11/15:** Masukkan bilangan Bilik Tidur & Bilik Air:\n*(Contoh: 3 Bilik, 2 Bilik Air)*", parse_mode="Markdown")
-    bot.register_next_step_handler(msg, step_maintenance)
-
-def step_maintenance(message):
-    user_id = message.from_user.id
-    user_data[user_id]['rooms'] = message.text
-    msg = bot.send_message(message.chat.id, "💵 **Langkah 12/15:** Masukkan yuran Maintenance (RM):\n*(Jika tiada/bebas, taip 'Tiada')*", parse_mode="Markdown")
-    bot.register_next_step_handler(msg, step_surrounding)
-
-def step_surrounding(message):
-    user_id = message.from_user.id
-    user_data[user_id]['maintenance'] = message.text
-    msg = bot.send_message(message.chat.id, "🏙️ **Langkah 13/15:** Masukkan Surrounding Area / Kemudahan Berdekatan:\n*(Contoh: Near LRT, Aeon Mall, Highway Federal)*", parse_mode="Markdown")
-    bot.register_next_step_handler(msg, step_image)
-
-def step_image(message):
-    user_id = message.from_user.id
-    user_data[user_id]['surrounding'] = message.text
-    msg = bot.send_message(message.chat.id, "🖼️ **Langkah 14/15:** Hantar satu Gambar Utama Hartanah (atau hantar teks 'Skip' jika tiada):", parse_mode="Markdown")
-    bot.register_next_step_handler(msg, step_confirm)
-
-def step_confirm(message):
-    user_id = message.from_user.id
-    
-    if message.content_type == 'photo':
-        user_data[user_id]['image_id'] = message.photo[-1].file_id
-    else:
-        user_data[user_id]['image_id'] = None
-
-    d = user_data[user_id]
-    
+    # Summary Preview
     summary = (
-        f"🏠 **SUMMARY LISTING HARTANAH** 🏠\n\n"
-        f"📌 **Status:** {d.get('listing_type')} | {d.get('prop_type')}\n"
-        f"📍 **Lokasi:** {d.get('location')}\n"
-        f"💰 **Harga:** RM {d.get('price')}\n"
-        f"📊 **Market Value:** {d.get('market_value')}\n\n"
-        f"📐 **Saiz:** {d.get('size')}\n"
-        f"🛏️ **Bilik/Bilik Air:** {d.get('rooms')}\n"
-        f"📜 **Tenure:** {d.get('tenure')} (Baki: {d.get('lease_years')})\n"
-        f"🏷️ **Lot Status:** {d.get('lot_status')}\n"
-        f"🛡️ **Gated & Guarded:** {d.get('gated')}\n"
-        f"🚗 **Parkir:** {d.get('parking')}\n"
-        f"💵 **Maintenance:** {d.get('maintenance')}\n"
-        f"🏙️ **Surrounding Area:** {d.get('surrounding')}\n\n"
-        f"✅ *Adakah anda mahu menyimpannya ke Database?*"
+        f"📋 **SEMAKAN MAKLUMAT LISTING**\n\n"
+        f"🔹 **Jenis:** {data['trans_type']} - {data['property_type']}\n"
+        f"🏷️ **Tajuk:** {data['title']}\n"
+        f"📍 **Lokasi:** {data['location']}\n"
+        f"💰 **Harga:** RM {data['price']}\n"
+        f"🛏️ **Bilik:** {data['bedrooms']} | 🚿 **Air:** {data['bathrooms']} | 🚗 **Parkir:** {data['parking']}\n"
+        f"📐 **Keluasan:** {data['size']}\n"
+        f"📜 **Tenure:** {data['tenure']}\n"
+        f"✨ **Ciri:** {data['features']}\n"
+        f"📞 **Kontak:** {data['contact']}\n"
+        f"📝 **Remarks:** {data['remarks']}\n\n"
+        f"Adakah anda ingin simpan listing ini?"
     )
+    
+    markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
+    markup.add("💾 Simpan Listing", "❌ Batalkan")
+    msg = bot.reply_to(message, summary, reply_markup=markup, parse_mode="Markdown")
+    bot.register_next_step_handler(msg, save_listing_to_db, data)
 
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("💾 Simpan Listing", callback_data="save_listing_final"))
+def save_listing_to_db(message, data):
+    if message.text != "💾 Simpan Listing":
+        bot.reply_to(message, "❌ Proses penambahan listing dibatalkan.", reply_markup=types.ReplyKeyboardRemove())
+        return
 
-    if d['image_id']:
-        bot.send_photo(message.chat.id, d['image_id'], caption=summary, parse_mode="Markdown", reply_markup=markup)
-    else:
-        bot.send_message(message.chat.id, summary, parse_mode="Markdown", reply_markup=markup)
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('''
+        INSERT INTO listings (user_id, trans_type, property_type, title, location, price, bedrooms, bathrooms, parking, size, tenure, features, contact, remarks, photo_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ''', (
+        data['user_id'], data['trans_type'], data['property_type'], data['title'],
+        data['location'], data['price'], data['bedrooms'], data['bathrooms'],
+        data['parking'], data['size'], data['tenure'], data['features'],
+        data['contact'], data['remarks'], data['photo_id']
+    ))
+    conn.commit()
+    cur.close()
+    conn.close()
 
-# ------------------------------------
-# MAIN ENTRY POINT
-# ------------------------------------
+    bot.reply_to(message, "✅ **Berjaya!** Listing hartanah anda telah disimpan secara kekal di awan.", reply_markup=types.ReplyKeyboardRemove(), parse_mode="Markdown")
+
+# ================= CALLBACK HANDLER (VIEW & DELETE) =================
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    parts = call.data.split('_')
+    action = parts[0]
+    listing_id = parts[1]
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM listings WHERE id = %s", (listing_id,))
+    row = cur.fetchone()
+
+    if not row:
+        cur.close()
+        conn.close()
+        bot.answer_callback_query(call.id, "❌ Rekod tidak dijumpai.")
+        return
+
+    if action == "view":
+        caption = (
+            f"🏠 **{row['property_type']} ({row['trans_type']})**\n\n"
+            f"🏷️ **{row['title']}**\n"
+            f"📍 **Lokasi:** {row['location']}\n"
+            f"💰 **Harga:** RM {row['price']}\n"
+            f"🛏️ **Bilik:** {row['bedrooms']} | 🚿 **Air:** {row['bathrooms']} | 🚗 **Parkir:** {row['parking']}\n"
+            f"📐 **Saiz:** {row['size']}\n"
+            f"📜 **Tenure:** {row['tenure']}\n"
+            f"✨ **Ciri:** {row['features']}\n"
+            f"📞 **Hubungi:** {row['contact']}\n"
+            f"📝 **Nota:** {row['remarks']}"
+        )
+        if row['photo_id']:
+            bot.send_photo(call.message.chat.id, row['photo_id'], caption=caption, parse_mode="Markdown")
+        else:
+            bot.send_message(call.message.chat.id, caption, parse_mode="Markdown")
+        bot.answer_callback_query(call.id)
+
+    elif action == "del":
+        cur.execute("DELETE FROM listings WHERE id = %s", (listing_id,))
+        conn.commit()
+        bot.answer_callback_query(call.id, "🗑️ Listing berjaya dipadam!")
+        bot.edit_message_text("🗑️ *Listing ini telah dipadam.*", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+
+    cur.close()
+    conn.close()
+
+# ================= MAIN EXECUTION =================
 if __name__ == "__main__":
     t = threading.Thread(target=run_flask)
     t.start()
-    
-    print("RenBot sedang berjalan...")
-    bot.infinity_polling(skip_pending=True)
+    bot.infinity_polling()
