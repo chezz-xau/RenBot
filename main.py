@@ -16,7 +16,7 @@ WHITELISTED_USERS = [ADMIN_ID]
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # ------------------------------------
-# 1. DATABASE SETUP (SQLite)
+# 1. DATABASE SETUP
 # ------------------------------------
 def init_db():
     conn = sqlite3.connect('renbot.db')
@@ -70,8 +70,6 @@ user_data = {}
 def send_welcome(message):
     user_id = message.from_user.id
     user_name = message.from_user.first_name
-    
-    # Reset sebarang handler jawapan yang tergantung
     bot.clear_step_handler_by_chat_id(message.chat.id)
 
     if user_id not in WHITELISTED_USERS:
@@ -93,6 +91,7 @@ def send_welcome(message):
         parse_mode="Markdown"
     )
 
+# --- FUNGSI LIHAT SENARAI LISTING (/list) ---
 @bot.message_handler(commands=['list'])
 def list_listings(message):
     user_id = message.from_user.id
@@ -111,11 +110,23 @@ def list_listings(message):
         bot.reply_to(message, "📂 Tiada listing hartanah yang tersimpan lagi.")
         return
 
-    response = "📂 **SENARAI LISTING HARTANAH ANDA:**\n\n"
-    for row in rows:
-        response += f"🔹 **ID #{row[0]}** | `{row[1]}` - {row[2]}\n📍 Lokasi: {row[3]}\n💰 Harga: RM {row[4]}\n\n"
+    bot.reply_to(message, "📂 **SENARAI LISTING HARTANAH ANDA:**", parse_mode="Markdown")
     
-    bot.reply_to(message, response, parse_mode="Markdown")
+    # Hantar setiap listing sebagai kad mesej berasingan bersama butang aksi
+    for row in rows:
+        listing_id, listing_type, prop_type, location, price = row
+        msg_text = (
+            f"🔹 **ID #{listing_id}** | `{listing_type}` - {prop_type}\n"
+            f"📍 **Lokasi:** {location}\n"
+            f"💰 **Harga:** RM {price}"
+        )
+        
+        markup = types.InlineKeyboardMarkup()
+        btn_view = types.InlineKeyboardButton("👁️ Lihat Detail", callback_data=f"view_detail_{listing_id}")
+        btn_delete = types.InlineKeyboardButton("🗑️ Padam", callback_data=f"delete_listing_{listing_id}")
+        markup.add(btn_view, btn_delete)
+        
+        bot.send_message(message.chat.id, msg_text, reply_markup=markup, parse_mode="Markdown")
 
 @bot.message_handler(commands=['add'])
 def start_add_listing(message):
@@ -123,7 +134,6 @@ def start_add_listing(message):
     if user_id not in WHITELISTED_USERS:
         return
 
-    # Kunci utama: bersihkan sebarang step handler lama yang tersangkut
     bot.clear_step_handler_by_chat_id(message.chat.id)
     user_data[user_id] = {}
 
@@ -145,10 +155,59 @@ def handle_callbacks(call):
     if user_id not in WHITELISTED_USERS:
         return
 
-    # Beri maklum balas serta-merta pada Telegram bahawa klik butang diterima
     bot.answer_callback_query(call.id)
-
     data = call.data
+
+    # --- PANGGUL DETAIL LISTING KELUAR ---
+    if data.startswith("view_detail_"):
+        listing_id = data.replace("view_detail_", "")
+        
+        conn = sqlite3.connect('renbot.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM listings WHERE id = ? AND user_id = ?", (listing_id, user_id))
+        item = cursor.fetchone()
+        conn.close()
+
+        if not item:
+            bot.send_message(chat_id, "⚠️ Listing tidak dijumpai.")
+            return
+
+        # Format maklumat penuh untuk dicetak semula
+        full_detail = (
+            f"🏠 **DETAIL LISTING HARTANAH #{item[0]}** 🏠\n\n"
+            f"📌 **Status:** {item[2]} | {item[3]}\n"
+            f"📍 **Lokasi:** {item[9]}\n"
+            f"💰 **Harga:** RM {item[10]}\n"
+            f"📊 **Market Value:** {item[11]}\n\n"
+            f"📐 **Saiz:** {item[12]}\n"
+            f"🛏️ **Bilik/Bilik Air:** {item[13]}\n"
+            f"📜 **Tenure:** {item[4]} (Baki: {item[5]})\n"
+            f"🏷️ **Lot Status:** {item[6]}\n"
+            f"🛡️ **Gated & Guarded:** {item[8]}\n"
+            f"🚗 **Parkir:** {item[7]}\n"
+            f"💵 **Maintenance:** {item[14]}\n"
+            f"🏙️ **Surrounding Area:** {item[15]}"
+        )
+        
+        image_id = item[16]
+        if image_id and image_id != "None":
+            bot.send_photo(chat_id, image_id, caption=full_detail, parse_mode="Markdown")
+        else:
+            bot.send_message(chat_id, full_detail, parse_mode="Markdown")
+        return
+
+    # --- PADAM LISTING ---
+    elif data.startswith("delete_listing_"):
+        listing_id = data.replace("delete_listing_", "")
+        
+        conn = sqlite3.connect('renbot.db')
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM listings WHERE id = ? AND user_id = ?", (listing_id, user_id))
+        conn.commit()
+        conn.close()
+
+        bot.send_message(chat_id, f"🗑️ Listing **#{listing_id}** telah berjaya dipadam dari database.", parse_mode="Markdown")
+        return
 
     # Simpan Akhir
     if data == "save_listing_final":
