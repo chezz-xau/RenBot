@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import threading
 from flask import Flask
 import telebot
@@ -15,13 +16,45 @@ WHITELISTED_USERS = [ADMIN_ID]
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # ------------------------------------
-# 1. FLASK WEB SERVER (Penyelenggaraan Render)
+# 1. DATABASE SETUP (SQLite)
+# ------------------------------------
+def init_db():
+    conn = sqlite3.connect('renbot.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS listings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            listing_type TEXT,
+            prop_type TEXT,
+            tenure TEXT,
+            lease_years TEXT,
+            lot_status TEXT,
+            parking TEXT,
+            gated TEXT,
+            location TEXT,
+            price TEXT,
+            market_value TEXT,
+            size TEXT,
+            rooms TEXT,
+            maintenance TEXT,
+            surrounding TEXT,
+            image_id TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# ------------------------------------
+# 2. FLASK WEB SERVER (Render Keep-Alive)
 # ------------------------------------
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "RenBot Web Service is running!"
+    return "RenBot Web Service is running with Database!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -31,7 +64,7 @@ def run_flask():
 user_data = {}
 
 # ------------------------------------
-# 2. BOT HANDLERS & NAVIGATION
+# 3. BOT HANDLERS & NAVIGATION
 # ------------------------------------
 
 @bot.message_handler(commands=['start'])
@@ -52,19 +85,43 @@ def send_welcome(message):
     bot.reply_to(
         message, 
         f"Selamat datang, **{user_name}**! 🏠\n"
-        f"Sistem *RenBot Real Estate Listing* sedia digunakan.\n\n"
-        f"Gunakan arahan /add untuk mula memasukkan listing hartanah baharu.",
+        f"Sistem *RenBot Real Estate Listing* aktif dengan Database.\n\n"
+        f"Gunakan arahan /add untuk mula memasukkan listing baharu\n"
+        f"atau /list untuk melihat senarai listing.",
         parse_mode="Markdown"
     )
 
-# --- MULA PROSES TAMBAH LISTING ---
+# --- SENARAIKAN LISTING (/list) ---
+@bot.message_handler(commands=['list'])
+def list_listings(message):
+    user_id = message.from_user.id
+    if user_id not in WHITELISTED_USERS:
+        return
+
+    conn = sqlite3.connect('renbot.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, listing_type, prop_type, location, price FROM listings WHERE user_id = ?", (user_id,))
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        bot.reply_to(message, "📂 Tiada listing hartanah yang tersimpan dalam sistem lagi.")
+        return
+
+    response = "📂 **SENARAI LISTING HARTANAHS ANDA:**\n\n"
+    for row in rows:
+        response += f"🔹 **ID #{row[0]}** | `{row[1]}` - {row[2]}\n📍 Lokasi: {row[3]}\n💰 Harga: RM {row[4]}\n\n"
+    
+    bot.reply_to(message, response, parse_mode="Markdown")
+
+# --- MULA PROSES TAMBAH LISTING (/add) ---
 @bot.message_handler(commands=['add'])
 def start_add_listing(message):
     user_id = message.from_user.id
     if user_id not in WHITELISTED_USERS:
         return
 
-    user_data[user_id] = {}  # Set semula data bagi pengguna
+    user_data[user_id] = {}
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     btn1 = types.InlineKeyboardButton("WTS (For Sale)", callback_data="listing_type_WTS")
@@ -83,6 +140,32 @@ def handle_callbacks(call):
         return
 
     data = call.data
+
+    # Simpan Akhir
+    if data == "save_listing_final":
+        d = user_data.get(user_id, {})
+        if not d:
+            bot.answer_callback_query(call.id, "Sesi tamat atau data kosong. Sila guna /add semula.")
+            return
+
+        conn = sqlite3.connect('renbot.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO listings (user_id, listing_type, prop_type, tenure, lease_years, lot_status, parking, gated, location, price, market_value, size, rooms, maintenance, surrounding, image_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            user_id, d.get('listing_type'), d.get('prop_type'), d.get('tenure'), d.get('lease_years'),
+            d.get('lot_status'), d.get('parking'), d.get('gated'), d.get('location'),
+            d.get('price'), d.get('market_value'), d.get('size'), d.get('rooms'),
+            d.get('maintenance'), d.get('surrounding'), d.get('image_id')
+        ))
+        conn.commit()
+        conn.close()
+
+        bot.edit_message_caption("✅ **Berjaya!** Listing hartanah anda telah disimpan secara kekal dalam database.", chat_id, call.message.message_id, parse_mode="Markdown")
+        bot.send_message(chat_id, "Guna arahan /list untuk melihat semua senarai listing anda.")
+        user_data.pop(user_id, None)
+        return
 
     # Step 1: WTS / WTL
     if data.startswith("listing_type_"):
@@ -205,13 +288,12 @@ def step_surrounding(message):
 def step_image(message):
     user_id = message.from_user.id
     user_data[user_id]['surrounding'] = message.text
-    msg = bot.send_message(message.chat.id, "🖼️ **Langkah 14/15:** Hantar satu Gambar Gambar Utama Hartanah:", parse_mode="Markdown")
+    msg = bot.send_message(message.chat.id, "🖼️ **Langkah 14/15:** Hantar satu Gambar Utama Hartanah:", parse_mode="Markdown")
     bot.register_next_step_handler(msg, step_confirm)
 
 def step_confirm(message):
     user_id = message.from_user.id
     
-    # Simpan Gambar jika pengguna memuat naik gambar
     if message.content_type == 'photo':
         user_data[user_id]['image_id'] = message.photo[-1].file_id
     else:
@@ -219,7 +301,6 @@ def step_confirm(message):
 
     d = user_data[user_id]
     
-    # Ringkasan Format Iklan
     summary = (
         f"🏠 **SUMMARY LISTING HARTANAH** 🏠\n\n"
         f"📌 **Status:** {d.get('listing_type')} | {d.get('prop_type')}\n"
@@ -234,7 +315,7 @@ def step_confirm(message):
         f"🚗 **Parkir:** {d.get('parking')}\n"
         f"💵 **Maintenance:** {d.get('maintenance')}\n"
         f"🏙️ **Surrounding Area:** {d.get('surrounding')}\n\n"
-        f"✅ *Adakah anda mahu menyimpannya?*"
+        f"✅ *Adakah anda mahu menyimpannya ke Database?*"
     )
 
     markup = types.InlineKeyboardMarkup()
@@ -252,5 +333,5 @@ if __name__ == "__main__":
     t = threading.Thread(target=run_flask)
     t.start()
     
-    print("RenBot sedang berjalan...")
+    print("RenBot dengan Database sedang berjalan...")
     bot.infinity_polling()
